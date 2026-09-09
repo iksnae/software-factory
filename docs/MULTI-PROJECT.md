@@ -177,9 +177,26 @@ wiring it in. A check needs a way to say "informational: never a repair signal".
 | --- | --- |
 | R1 | `cli.py`'s single `os.chdir(paths.repo_root)` is load-bearing — it is why the ported modules needed no rewiring. Multi-root makes every bare relative path ambiguous, and the failures are silent: a file written into the wrong member, not an exception. |
 | R2 | `git_helper._git()` runs git against the process cwd with no `cwd` argument at all. `permissions.py` already threads cwd properly; `git_helper` does not. |
-| R3 | `commit_all()` at the parent root stages gitlinks, never the contents of a submodule. A commit phase rooted at the parent silently commits pointers to work that was never committed in the member. |
-| R4 | `.sssf/data` derives from `repo_root`. Per-member traces and one workspace-level trace are both defensible; nothing currently decides. |
+| R3 | `commit_all()` at a superproject root produces one of **two** wrong outcomes, neither of them the gitlink commit an earlier revision of this document claimed. Probed on a throwaway parent+submodule fixture — see the correction note below. **(a)** With only submodule content dirty: `git add -A` stages nothing, but `status --porcelain` still reports ` M sub` so the guard at `git_helper.py:50-51` passes, and `git commit` exits 1 → a loud `RuntimeError` carrying a misleading message. **(b)** With a parent-owned file *also* dirty: the commit **succeeds**, returns a sha, and omits every submodule-resident change. (b) is the dangerous one and it is the common one. |
+| R4 | `.sssf/data` derives from `repo_root`. Per-member traces and one workspace-level trace are both defensible; nothing currently decides. An absolute `data_dir` (honoured verbatim by `paths.py` and `session.py`) collapses per-member isolation into one shared db, so per-member traces are a convention rather than an invariant. |
 | R5 | The factory's own dispatch creates occupancy that no external instrument can see (see above). |
+| R6 | A `changes` step at a superproject root has R3's defect and no guard catches it. `git diff --name-only HEAD` returns `sub`, so `ChangeSet.empty` is false and the empty-diff guard in `engine.py` does not fire. The run then writes a diff artifact whose entire content is a `-Subproject commit …-dirty` marker and hands it to a documenter or reviewer as the run's work product: `+0 -0` where real work exists. Refusing `commit` while admitting `changes` stops the loud half and keeps the silent half. |
+| R7 | Permission enforcement is **coarse at a superproject root, and can be blind.** `git diff HEAD --numstat` yields `0 0 sub` for arbitrary work inside a submodule, and `ls-files --others` does not see untracked files created inside one. So if a submodule was already dirty when a phase opened, `changed_paths()` reports nothing and a `writes: []` agent can rewrite or `git checkout` anything inside it undetected — the exact incident class `permissions.py` exists to catch. If it was clean, the path is detected but unrecoverable, because `preserve()` skips it (`target.is_file()` is false for a directory) and the phase aborts on something nothing can undo. |
+| R8 | The codex harness's OS sandbox root **is** the agent's cwd: `agent_codex.py` passes `-C request.cwd` alongside `-s sandbox`, and `_sandbox_for()` grants `workspace-write` to every agent that is not `writes: []`. Widening the agent's cwd to a workspace therefore widens a real OS write boundary from one member to the whole workspace. Any read-wide design must decouple the sandbox root from the agent cwd. |
+
+### Correction note
+
+R3 previously read: *"stages gitlinks, never the contents of a submodule … silently commits
+pointers to work that was never committed."* That was **wrong**, and it was wrong in the way
+this document warns about two sections down: written from reasoning, never probed. It was
+inherited verbatim into a downstream architecture frame before a reviewer built a ten-minute
+git fixture and disproved it.
+
+The refusal it argues for survives — the probed behaviour is worse, not better, because
+outcome (b) is silent and succeeds. But the failure mode a verification asserts has to be the
+one that exists, and R6, R7 and R8 were found by the same fixture that corrected R3. **A
+superproject-root fixture belongs in the first slice of this work, before any design rests on
+what git does at that root.**
 
 ---
 
