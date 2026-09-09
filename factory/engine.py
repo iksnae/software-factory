@@ -172,10 +172,23 @@ def validate(workflow: WorkflowConfig, cfg, name: str) -> None:
     # A `changes` step measuring against "baseline" needs a baseline to exist.
     # Caught here rather than at phase time, where it would surface as an empty
     # ref deep inside git plumbing after the run had already spent on agents.
+    #
+    # Walks `repair` as well as `steps`. An earlier version walked only `steps`,
+    # so a `changes` step declared as a loop's `repair` passed validation and then
+    # measured against an unpinned baseline at phase time — the exact failure this
+    # guard exists to prevent, reached by the one path it did not look down.
+    # Probed: with `pin_baseline: false`, a top-level `changes` was refused while
+    # the same step nested in a `repair` validated clean. `required_agents` below
+    # already walks both and is the model to copy.
     def needs_baseline(steps: list[StepConfig]) -> bool:
-        return any(step.step == "changes" and step.base == "baseline"
-                   or (step.steps and needs_baseline(step.steps))
-                   for step in steps)
+        for step in steps:
+            if step.step == "changes" and step.base == "baseline":
+                return True
+            if step.repair is not None and needs_baseline([step.repair]):
+                return True
+            if step.steps and needs_baseline(step.steps):
+                return True
+        return False
 
     if needs_baseline(workflow.steps) and not workflow.pin_baseline:
         raise WorkflowError(
