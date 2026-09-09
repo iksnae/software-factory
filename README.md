@@ -110,8 +110,8 @@ Full reference: [`docs/CONFIG.md`](docs/CONFIG.md). Models, providers, and
 harnesses: [`docs/MODELS.md`](docs/MODELS.md). Multi-submodule workspaces —
 **design input, nothing implemented** — [`docs/MULTI-PROJECT.md`](docs/MULTI-PROJECT.md). Worked examples:
 [`examples/inkwell.sssf.yaml`](examples/inkwell.sssf.yaml) (Bun app) and
-[`examples/khaos-publisher.sssf.yaml`](examples/khaos-publisher.sssf.yaml) (npm
-workspace monorepo).
+[`examples/npm-monorepo.sssf.yaml`](examples/npm-monorepo.sssf.yaml) (npm
+workspaces monorepo with its own `just` recipes).
 
 ## Models
 

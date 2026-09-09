@@ -1,0 +1,178 @@
+# A worked config for an npm-workspaces monorepo with its own `just` recipes.
+#
+# Adapt and drop it in as `sssf.config.yaml`, or drive it in place:
+#   sf check --repo ~/path/to/repo --config examples/npm-monorepo.sssf.yaml
+#
+# Every choice below is annotated, because the reasoning is the reusable part.
+# The timings are from a real repo of this shape and are what set the timeouts —
+# roughly 20x a measured run, so a slow day does not read as a failure.
+
+extends: config/rosters/open-weights.yaml
+
+paths:
+  # This repo keeps curated documentation in docs/ (architecture, ADRs), so
+  # factory output goes in subdirectories rather than mixed into that root.
+  specs: docs/specs/
+  docs: docs/runs/
+
+# ─── prepare: make the tree runnable before anything judges it ────────────────
+# Runs as the FIRST phase of every workflow, before any agent spawns, and aborts
+# the run on failure. A fresh `git worktree` — how the factory isolates a run —
+# has no node_modules, and every check below then fails for a reason that has
+# nothing to do with the code. Measured on a repo of this shape: six checks red
+# in a new worktree, all six green after one install.
+#
+# Both commands are THE PROJECT'S OWN, not generic guesses, so they follow the
+# repo instead of drifting from it:
+#
+#   just bootstrap      `npm ci` — the pinned install from the lockfile. Chosen
+#                       over `npm install` deliberately: ci cannot silently move
+#                       package-lock.json, and if a builder adds a dependency
+#                       without updating the lockfile, the NEXT run's prepare
+#                       fails loudly instead of judging a tree that only works
+#                       on one machine.
+#
+#   just install-hooks  Points core.hooksPath at the repo's tracked hooks. The
+#                       factory commits, so a commit-msg hook that a repo's own
+#                       gates depend on has to be live.
+#
+#                       SIDE EFFECT, stated because it reaches outside a
+#                       worktree: git config is SHARED between a repo and its
+#                       worktrees, so this writes the parent repo's config too.
+#                       Prefer a relative hooksPath for exactly that reason — an
+#                       absolute one makes every worktree run the parent's copy
+#                       of the hook instead of its own branch's.
+#
+# Both are idempotent; prepare runs on every workflow, not once per tree.
+prepare:
+  bootstrap:
+    argv: [just, bootstrap]
+    area: repo
+    operation: install
+    timeout_seconds: 900
+    description: Install pinned dependencies from the lockfile
+
+  hooks:
+    argv: [just, install-hooks]
+    area: repo
+    operation: install
+    timeout_seconds: 60
+    description: Point git at the tracked commit-msg hook this repo's gates require
+
+quality:
+  checks:
+    test_contracts:
+      argv: [npm, run, test:contracts]
+      area: contracts
+      operation: test
+      timeout_seconds: 180        # measured ~8s
+      description: node --test over the contract suites
+
+    test_scripts:
+      argv: [npm, run, test:scripts]
+      area: scripts
+      operation: test
+      timeout_seconds: 120        # measured ~3s
+
+    typecheck:
+      argv: [npm, run, typecheck]
+      area: app
+      operation: typecheck
+      timeout_seconds: 300        # measured ~4s
+
+    code_health:
+      argv: [npm, run, check:code-health]
+      area: repo
+      operation: lint
+      timeout_seconds: 120
+
+    validate_contracts:
+      argv: [npm, run, validate:contracts]
+      area: contracts
+      operation: lint
+      timeout_seconds: 120
+
+    docs_check:
+      argv: [npm, run, check:docs]
+      area: repo
+      operation: lint
+      timeout_seconds: 120
+
+    # The whole suite across every workspace. NOT in the `test` group — see below.
+    test_all:
+      argv: [npm, test]
+      area: app
+      operation: test
+      timeout_seconds: 900
+      description: every workspace suite; the repo's own definition of green
+
+  groups:
+    # What the verify loop re-runs after every builder repair. It must be FAST
+    # and it must be GREEN before the factory starts, or the builder spends its
+    # whole repair budget on a failure it did not cause.
+    #
+    # `npm test` is excluded here for a reason worth generalising: on the repo
+    # this came from, the full suite was RED on the default branch because a
+    # workspace declared in package.json was not linked under node_modules —
+    # an environment fault, not a code fault. A verify loop handed that would
+    # ask a builder to fix something it cannot fix. Confirm the full suite is
+    # green in a fresh worktree, then promote `test_all` into this group.
+    test: [test_contracts, test_scripts]
+
+    # What the `quality` workflow runs. Deliberately NOT the repo's aggregate
+    # `check` recipe: that chain also runs release-readiness and installer
+    # checks which reach for cloud credentials and deployment state. An agent
+    # loop has no business triggering those.
+    full: [test_contracts, test_scripts, typecheck,
+           code_health, validate_contracts, docs_check]
+
+# ─── model staffing overrides ─────────────────────────────────────────────────
+# All open weights, so nothing here depends on a subscription quota.
+#
+# Routed FIRST-PARTY where pi is authenticated for the provider directly, which
+# skips OpenRouter's margin on the same weights. Check what you have with:
+#   pi --list-models | awk '$1=="deepseek"'
+#
+# The tradeoff, stated because it is easy to lose: direct providers usually
+# expose UNDATED ids only. Those are rolling aliases, so two best-of-N runs
+# months apart are not comparing the same weights. Pin a dated id through
+# OpenRouter instead when reproducibility matters more than margin.
+#
+# And a warning from a real failure: a direct provider with a stale credential
+# returns 401, which pi surfaces as an empty response with stopReason "error".
+# Verify a new route with one cheap call before putting it on the builder.
+agents:
+  # The plan is the highest-leverage artifact — the builder implements it without
+  # re-deciding anything — so the strongest available model goes here.
+  - name: planner
+    model: deepseek/deepseek-v4-pro
+    thinking: high
+
+  - name: scout
+    model: deepseek/deepseek-v4-flash   # mechanical recon
+
+  - name: documenter
+    model: deepseek/deepseek-v4-flash   # one long diff read
+
+  # A 1M window matters on the verdict: the reviewer reads a whole diff against
+  # a whole plan.
+  - name: reviewer
+    model: openrouter/z-ai/glm-5.3-flash
+    thinking: high
+
+  # Svelte support, via pi's MCP adapter (npm:pi-mcp-adapter, loaded from pi's
+  # own settings on every run). ONE name, not four: the adapter registers
+  # proxy-only servers as a single `mcp__<server>` tool taking {tool, args} — see
+  # namespaceProxyName in its mcp-references.ts — so `mcp__svelte` carries all of
+  # @sveltejs/mcp's tools (list-sections, get-documentation, svelte-autofixer,
+  # playground-link). Individual names require `directTools: true` on the server
+  # in ~/.pi/agent/mcp.json, which is global pi config, not a repo's business.
+  #
+  # `tools:` REPLACES the roster's list rather than merging, so the builder's
+  # whole allowlist is restated. Without naming it the tool is silently filtered:
+  # pi's --tools filters extension and custom tools too, not just builtins.
+  #
+  # Cost note: registration only reads the adapter's metadata cache, so it is
+  # free. The server boots on first CALL (npx), which is slow cold.
+  - name: builder
+    tools: [read, grep, find, ls, bash, edit, write, mcp__svelte]
