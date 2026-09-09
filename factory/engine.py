@@ -20,6 +20,11 @@ Eight step kinds cover every stock workflow:
     commit        commit the tree in one agent's own words
     group         a nested list of steps, usually behind a `when:` condition
 
+Ahead of all of them, when the repo's config declares `prepare:`, comes one phase
+that no workflow asks for: the commands that make the tree runnable at all. It is
+not a step kind because it is not a choice — a tree with no dependencies installed
+cannot be planned against, built in, or tested, whichever workflow you picked.
+
 Nothing here decides anything a phase could decide for itself. The engine's only
 judgements are the ones the ADW scripts made in Python: what counts as verified,
 when a stale green result must be re-earned, and what stops the chain.
@@ -214,7 +219,12 @@ def describe_chain(workflow: WorkflowConfig, cfg) -> str:
                 out.append(f"if {step.when or 'always'}: ({inner})" if step.when else inner)
         return out
 
-    return " -> ".join(render(workflow.steps))
+    rendered = render(workflow.steps)
+    if cfg.prepare:
+        # Prepended, not part of the graph: it runs for every workflow rather
+        # than being declared by any one of them.
+        rendered.insert(0, f"code(prepare)[{', '.join(cfg.prepare)}]")
+    return " -> ".join(rendered)
 
 
 # ── execution ───────────────────────────────────────────────────────────────
@@ -382,6 +392,34 @@ def _run_steps(run, state: State, steps: list[StepConfig], prompt: str) -> None:
             _run_steps(run, state, step.steps, prompt)
 
 
+def _prepare(run) -> None:
+    """Make the repo runnable before anything judges it.
+
+    Runs as the first phase of EVERY workflow, ahead of the request, because a
+    tree whose dependencies are missing cannot be planned against, built in, or
+    tested — and the factory's own `just worktree` hands over exactly such a
+    tree. Six checks were measured red in a fresh worktree and all six green
+    after one `npm install`; without this the builder would have spent its whole
+    repair budget on a missing dependency it did not cause.
+
+    A failure here ABORTS. That is the difference from a quality phase: a red
+    check is a finding to repair, an unprepared tree was never fit to judge, so
+    no agent is spawned and no money is spent.
+    """
+    if not run.cfg.prepare:
+        return
+    with run.phase(PhaseParams(
+            name="prepare", kind="code", owner="quality",
+            description="Make the repo runnable — install what the checks and the "
+                        "builder both need before either is asked anything")) as ph:
+        result = quality.run_prepare(run)
+        _record(ph, result)
+        if not result.passed:
+            raise RuntimeError(
+                "prepare failed, so nothing was planned, built or judged:\n"
+                + "\n".join(result.failures))
+
+
 def execute(run, workflow: WorkflowConfig, name: str, prompt: str) -> int:
     """Run a declared workflow end to end and return its exit code."""
     # Pinned BEFORE the first commit phase, because by then the run has moved
@@ -398,6 +436,7 @@ def execute(run, workflow: WorkflowConfig, name: str, prompt: str) -> int:
                                           "description": workflow.description,
                                           **run.paths.describe()}))
 
+    _prepare(run)
     _run_steps(run, state, workflow.steps, prompt)
 
     accepted = state.verified if workflow.accept == "verified" else True

@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import engine
+from . import engine, stacks
 from .modules import agents, agent_pi, session, utils
 from .modules.data_types import SSSFConfig
 from .paths import FACTORY_HOME, Paths
@@ -140,6 +140,7 @@ def cmd_list(args) -> int:
     cfg, _, config_path = load(args.repo, args.config, args.roster)
     print(f"config:  {config_path}")
     print(f"agents:  {', '.join(a.name for a in cfg.agents) or '(none)'}")
+    print(f"prepare: {', '.join(cfg.prepare) or '(none)'}")
     checks = ", ".join(sorted(cfg.quality.checks)) or "(none)"
     print(f"checks:  {checks}")
     groups = ", ".join(f"{k}[{len(v)}]" for k, v in sorted(cfg.quality.groups.items()))
@@ -181,7 +182,7 @@ def cmd_check(args) -> int:
     for key, value in paths.describe().items():
         print(f"{key + ':':<14}{value}")
     print(f"\nworkflows: {len(cfg.workflows)}   agents: {len(cfg.agents)}   "
-          f"checks: {len(cfg.quality.checks)}")
+          f"checks: {len(cfg.quality.checks)}   prepare: {len(cfg.prepare)}")
     if problems:
         print("\nFAILED")
         for problem in problems:
@@ -247,26 +248,90 @@ def cmd_doctor(args) -> int:
     check("every roster model resolves", not unresolved,
           ", ".join(unresolved) if unresolved else f"{len(cfg.agents)} agents")
 
-    missing = [name for name, check_cfg in cfg.quality.checks.items()
-               if not shutil.which(check_cfg.argv[0])]
-    check("every quality command's binary exists", not missing,
-          ", ".join(missing) if missing else f"{len(cfg.quality.checks)} checks")
+    # Both blocks, because a missing `prepare` binary fails the very first phase
+    # of every workflow and is the least obvious thing to go looking for.
+    commands = {**cfg.prepare, **cfg.quality.checks}
+    missing = [name for name, entry in commands.items()
+               if not shutil.which(entry.argv[0])]
+    check("every command's binary exists", not missing,
+          ", ".join(missing) if missing else
+          f"{len(cfg.prepare)} prepare + {len(cfg.quality.checks)} checks")
 
     print(f"\n  factory doctor: {'OK' if ok else 'FAILED'}")
     return 0 if ok else 1
 
 
 def cmd_init(args) -> int:
-    """Write a starter config into a target repo. Never overwrites."""
+    """Write a starter config into a target repo. Never overwrites.
+
+    Detection reads the repo and writes real commands where it can, because the
+    alternative — the placeholder `echo` this used to emit — leaves `prepare:`
+    empty, and an empty prepare is what turns a fresh worktree into six red
+    checks that have nothing to do with the code.
+    """
     repo = Path(args.repo).expanduser().resolve()
     target = repo / "sssf.config.yaml"
     if target.exists() and not args.force:
         raise SystemExit(f"{target} already exists — pass --force to overwrite")
-    template = FACTORY_HOME / "config" / "starter.config.yaml"
-    body = template.read_text().replace("{{roster}}", _roster_path(args.roster or "default"))
-    target.write_text(body)
+
+    stack = stacks.detect(repo)
+    roster = _roster_path(args.roster or "default")
+
+    header = (FACTORY_HOME / "config" / "starter.config.yaml").read_text()
+    header = header.split("# ─── REQUIRED")[0].replace("{{roster}}", roster)
+
+    body = [header.rstrip(), ""]
+    if stack.names:
+        body.append(f"# Detected stack: {', '.join(stack.names)}")
+    for note in stack.notes:
+        body.append(f"#   note: {note}")
+    body.append("# Every command below was inferred by reading this repo. Read them, fix what")
+    body.append("# is wrong, delete what you do not want — none of it is applied invisibly.")
+    body.append("")
+
+    if stack.prepare:
+        body.append("# Runs as the FIRST phase of every workflow, before any agent spawns, and")
+        body.append("# aborts the run on failure. Must be idempotent.")
+        body.append("prepare:")
+        body.append(stacks.render_block("prepare", stack.prepare).rstrip())
+        body.append("")
+    else:
+        body.append("# prepare:            # nothing to install was detected. If this repo needs")
+        body.append("#   install:          # a dependency install before its checks can run, say so")
+        body.append("#     argv: [make, deps]")
+        body.append("")
+
+    body.append("quality:")
+    body.append("  checks:")
+    if stack.checks:
+        body.append(stacks.render_block("checks", stack.checks, indent="    ").rstrip())
+    else:
+        body.append("    test:")
+        body.append('      argv: [echo, "REPLACE ME — no test command was detected"]')
+        body.append("      operation: test")
+        body.append("      timeout_seconds: 600")
+    body.append("")
+
+    # The stock workflows reference exactly these two group names, so both are
+    # always written even when they hold the same one check.
+    tests = [c.name for c in stack.checks if c.operation == "test"] or ["test"]
+    every = [c.name for c in stack.checks] or ["test"]
+    body.append("  # `test` is what the verify loop re-runs after every builder repair, so keep")
+    body.append("  # it fast and green. `full` is what the `quality` workflow runs.")
+    body.append("  groups:")
+    body.append(f"    test: [{', '.join(tests)}]")
+    body.append(f"    full: [{', '.join(every)}]")
+    body.append("")
+
+    target.write_text("\n".join(body))
     print(f"wrote {target}")
-    print(f"next: edit its `quality:` block, then `sf check --repo {repo}`")
+    if stack.names:
+        print(f"detected: {', '.join(stack.names)}")
+    for note in stack.notes:
+        print(f"  note: {note}")
+    print(f"  prepare: {', '.join(c.name for c in stack.prepare) or '(none)'}")
+    print(f"  checks:  {', '.join(c.name for c in stack.checks) or '(none — fill in `test`)'}")
+    print(f"next: review it, then `sf check --repo {repo}`")
     return 0
 
 

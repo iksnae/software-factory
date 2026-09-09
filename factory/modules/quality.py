@@ -41,23 +41,38 @@ def _check_dir(run, name: str) -> Path:
     return path
 
 
-def specs_for(run, names: list[str]) -> list[QualityCheckSpec]:
-    """Turn configured check names into runnable specs, resolving {outdir}.
+def _specs_from(run, configured: dict, names: list[str]) -> list[QualityCheckSpec]:
+    """Turn named command configs into runnable specs, resolving {outdir}.
 
     Argv is taken verbatim apart from that one token. No shell, so nothing in a
     repo's config is word-split or glob-expanded behind its back — a path with a
     space is just a path with a space.
     """
-    quality: QualityConfig = run.cfg.quality
     specs = []
-    for name in quality.resolve(names):
-        configured = quality.checks[name]
+    for name in names:
+        entry = configured[name]
         outdir = _check_dir(run, name) / "out"
-        argv = [part.replace(OUTDIR_TOKEN, str(outdir)) for part in configured.argv]
+        argv = [part.replace(OUTDIR_TOKEN, str(outdir)) for part in entry.argv]
         specs.append(QualityCheckSpec(
-            name=name, area=configured.area, operation=configured.operation,
-            argv=argv, timeout_seconds=configured.timeout_seconds))
+            name=name, area=entry.area, operation=entry.operation,
+            argv=argv, timeout_seconds=entry.timeout_seconds))
     return specs
+
+
+def specs_for(run, names: list[str]) -> list[QualityCheckSpec]:
+    """Specs for the named quality checks, validated against the repo's config."""
+    quality: QualityConfig = run.cfg.quality
+    return _specs_from(run, quality.checks, quality.resolve(names))
+
+
+def prepare_specs(run) -> list[QualityCheckSpec]:
+    """Specs for the `prepare:` block, in the order the config declares them.
+
+    Order is preserved rather than sorted: a repo may legitimately need `npm
+    install` before `npm run build`, and dict order is the only place that
+    intent can be expressed.
+    """
+    return _specs_from(run, run.cfg.prepare, list(run.cfg.prepare))
 
 
 def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
@@ -67,7 +82,8 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
     command = shlex.join(spec.argv)
     env = operator_env()             # the engineer's own shell environment
 
-    run.console.note(f"quality {spec.name}: {command}")
+    label = phase.params.name
+    run.console.note(f"{label} {spec.name}: {command}")
     started_at = now_iso()
     clock = time.monotonic()
     stdout = ""
@@ -117,7 +133,7 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
         ended_at=now_iso(),
     ))
     run.console.note(
-        f"quality {spec.name}: {'passed' if passed else 'failed'} "
+        f"{label} {spec.name}: {'passed' if passed else 'failed'} "
         f"(exit {returncode}, {duration:.1f}s)"
     )
     return QualityCheckResult(
@@ -133,13 +149,19 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
     )
 
 
-def run_checks(run, names: list[str]) -> QualityResult:
-    """Run the named checks and collect EVERY failure, not just the first.
+def run_specs(run, specs: list[QualityCheckSpec], stop_early: bool = False) -> QualityResult:
+    """Run the given specs and collect EVERY failure, not just the first.
 
     A builder repairing one failure at a time pays for a whole phase per fix, so
-    all checks run even after one goes red.
+    checks all run even after one goes red. `stop_early` is for `prepare:`, where
+    the commands are usually ordered and dependent — running `npm run build`
+    after `npm install` failed just produces a second, more confusing error.
     """
-    checks = [_run(spec, run) for spec in specs_for(run, names)]
+    checks = []
+    for spec in specs:
+        checks.append(_run(spec, run))
+        if stop_early and not checks[-1].passed:
+            break
     # A failure is the command, its exit code, and what it actually printed —
     # everything a builder needs to repair without opening a log or being told
     # what the error "means" by a parser that guessed.
@@ -153,6 +175,16 @@ def run_checks(run, names: list[str]) -> QualityResult:
         failures=failures,
         artifacts=[check.output_artifact for check in checks],
     )
+
+
+def run_checks(run, names: list[str]) -> QualityResult:
+    """The named quality checks, as a QualityResult."""
+    return run_specs(run, specs_for(run, names))
+
+
+def run_prepare(run) -> QualityResult:
+    """The `prepare:` commands, in order, stopping at the first failure."""
+    return run_specs(run, prepare_specs(run), stop_early=True)
 
 
 def as_envelope(result: QualityResult, what: str) -> VerifyOutput:

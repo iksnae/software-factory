@@ -52,8 +52,8 @@ pi --list-models | awk '$1=="openai-codex"{print $2}'   # subscription models
 cd ~/Projects/my-app
 FACTORY=~/Developer/software-factory
 
-just -f $FACTORY/justfile config init      # writes sssf.config.yaml
-$EDITOR sssf.config.yaml                   # fill in your test command
+just -f $FACTORY/justfile config init      # detects your stack, writes sssf.config.yaml
+$EDITOR sssf.config.yaml                   # read what it inferred; fix or delete
 just -f $FACTORY/justfile config check     # validates everything, spends nothing
 just -f $FACTORY/justfile quality "smoke"  # deterministic only — still no spend
 just -f $FACTORY/justfile sdlc "add a word-count badge to the editor footer"
@@ -81,10 +81,16 @@ config/rosters/*.yaml   WHO runs it    model staffing per agent
 edits the builder and leaves the other four alone. `just config layers` prints the
 resolution order for any repo.
 
-A minimal repo config is short on purpose:
+A minimal repo config is short on purpose, and `sf init` drafts it by reading your
+stack — npm/bun/pnpm/yarn (the lockfile picks the frozen-install form), uv, cargo,
+SwiftPM, go, plus `package.json` scripts and `justfile` recipes:
 
 ```yaml
 extends: config/rosters/default.yaml
+
+prepare:                      # first phase of every workflow; failure aborts the run
+  install:
+    argv: [npm, ci]
 
 quality:
   checks:
@@ -95,6 +101,10 @@ quality:
     test: [test]
     full: [test]
 ```
+
+`prepare:` is what makes an isolated worktree usable: a fresh one has no
+`node_modules`, so without it every check fails for reasons unrelated to the code
+and a builder burns its repair budget on a missing dependency.
 
 Full reference: [`docs/CONFIG.md`](docs/CONFIG.md). Models, providers, and
 harnesses: [`docs/MODELS.md`](docs/MODELS.md). Worked examples:

@@ -494,6 +494,20 @@ class SSSFConfig(BaseModel):
     defaults: ConfigDefaults = Field(default_factory=ConfigDefaults)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     agents: list[AgentConfig] = Field(default_factory=list)
+    # Commands that make the repo RUNNABLE, executed as the first phase of every
+    # workflow, before any agent spawns. Same shape as a quality check because it
+    # is the same machinery — what differs is when it runs and what a failure
+    # means: a red check is a finding to repair, a failed prepare is a tree that
+    # was never fit to judge, so the run aborts instead of asking a builder to fix
+    # someone else's missing dependency.
+    #
+    # This exists because the factory's own `just worktree` hands over a tree with
+    # no node_modules/.venv/target, where every check fails for a reason that has
+    # nothing to do with the code. Measured: six checks red in a fresh worktree,
+    # all six green after one `npm install`.
+    #
+    # Must be idempotent — it runs on every workflow, not once per tree.
+    prepare: dict[str, QualityCheckConfig] = Field(default_factory=dict)
     quality: QualityConfig = Field(default_factory=QualityConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)

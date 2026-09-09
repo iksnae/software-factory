@@ -1,6 +1,7 @@
 # Configuration reference
 
-One file in your repo drives everything. This is what it may contain.
+One file in your repo drives everything. This is what it may contain. `sf init`
+writes a first draft by detecting your stack — see [Detection](#detection).
 
 `just config check --repo <path>` validates all of it — every workflow, every
 agent, every model, every check name — and spawns nothing. Run it after any edit.
@@ -33,7 +34,75 @@ Config discovery, when `--config` is not given: `sssf.config.yaml`, then
 
 ---
 
-## `quality:` — required
+## `prepare:` — make the tree runnable
+
+Commands that run as the **first phase of every workflow**, before any agent
+spawns. A failure aborts the run: no agent, no spend.
+
+```yaml
+prepare:
+  bootstrap:
+    argv: [just, bootstrap]        # this project's own install recipe
+    operation: install
+    timeout_seconds: 900
+    description: Install pinned dependencies from the lockfile
+  hooks:
+    argv: [just, install-hooks]
+    timeout_seconds: 60
+```
+
+Why it exists: the factory isolates runs with `just worktree`, and a fresh git
+worktree has no `node_modules`, `.venv`, or `target/`. Measured on a real repo —
+six checks red in a new worktree, all six green after one install. Without
+`prepare`, a builder dropped into that tree spends its entire repair budget on a
+missing dependency it did not cause.
+
+The difference from a quality check is what a failure *means*. A red check is a
+finding to hand back to the builder; an unprepared tree was never fit to judge, so
+the run stops instead.
+
+Four rules:
+
+- **Idempotent.** It runs on every workflow, not once per tree.
+- **Ordered, and it stops at the first failure.** Config order is preserved, so
+  `install` before `build` works; running the second after the first failed only
+  produces a more confusing error.
+- **Prefer the project's own command.** `just bootstrap` over an inferred
+  `npm ci`: if the project changes how it installs, prepare follows.
+- **Prefer the frozen install.** `npm ci` over `npm install`, `--frozen-lockfile`
+  over a bare install. A pinned install cannot silently move the lockfile, and if
+  a builder adds a dependency without updating it, the next run's prepare fails
+  loudly instead of judging a tree that only works on one machine.
+
+Watch for commands that reach outside the worktree. `just install-hooks` writes
+`core.hooksPath`, and git config is **shared** between a repo and its worktrees —
+so it changes the parent repo too. That can be the right thing (it was here: the
+live value was absolute, so every worktree ran main's copy of the hook instead of
+its own branch's) but it should be a decision, not a surprise.
+
+### Detection
+
+`sf init` reads the repo and writes real commands rather than placeholders:
+
+```
+$ sf init --repo ~/Projects/my-app
+detected: npm workspaces
+  note: workspaces detected: a fresh worktree has none of them linked
+  prepare: install
+  checks:  test, typecheck, lint
+```
+
+It knows npm/bun/pnpm/yarn (lockfile decides which, and which frozen-install
+flag), uv, cargo, SwiftPM, and go, and it reads `package.json` scripts and
+`justfile` recipes. Three rules keep it from being magic: the project's own
+commands win over inferred ones, the lockfile decides the ecosystem, and
+everything emitted is written into your config as ordinary editable commands —
+never applied invisibly.
+
+It reads only the repo **root**. A monorepo whose manifests live in `apps/*` gets
+a note naming them rather than a guess about which member is "the" app.
+
+## `quality:` — the checks
 
 The one block nobody can write for you. A factory that assumed `npm test` would be
 confidently wrong in most repos.

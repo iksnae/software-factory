@@ -22,6 +22,54 @@ paths:
   specs: docs/specs/
   docs: docs/runs/
 
+# ─── prepare: make the tree runnable before anything judges it ────────────────
+# Runs as the FIRST phase of every workflow, before any agent spawns, and aborts
+# the run on failure. A fresh `git worktree` — how the factory isolates a run —
+# has no node_modules, and every check below then fails for a reason that has
+# nothing to do with the code. Measured: six checks red in a new worktree, all
+# six green after one install.
+#
+# Both commands are THIS PROJECT'S OWN, not generic guesses, so they follow the
+# repo instead of drifting from it:
+#
+#   just bootstrap      `npm ci` — the pinned install from the lockfile. Chosen
+#                       over `npm install` deliberately: ci cannot silently move
+#                       package-lock.json, and if a builder adds a dependency
+#                       without updating the lockfile, the NEXT run's prepare
+#                       fails loudly instead of judging a tree that only works
+#                       on this machine.
+#
+#   just install-hooks  Points core.hooksPath at the tracked hooks. The factory
+#                       commits, so the commit-msg hook that strips agent
+#                       trailers has to be live — this repo's
+#                       `check:commit-trailers` gate fails a branch that carries
+#                       them.
+#
+#                       SIDE EFFECT, stated because it reaches outside the
+#                       worktree: git config is shared between a repo and its
+#                       worktrees, so this writes the parent repo's config too.
+#                       It sets the RELATIVE path the recipe intends, which is
+#                       also a fix — the live value was absolute
+#                       (/Users/k/Projects/khaos-publisher/scripts/hooks), so
+#                       every worktree was running main's copy of the hook
+#                       instead of its own branch's.
+#
+# Both are idempotent; prepare runs on every workflow, not once per tree.
+prepare:
+  bootstrap:
+    argv: [just, bootstrap]
+    area: repo
+    operation: install
+    timeout_seconds: 900
+    description: Install pinned dependencies from the lockfile
+
+  hooks:
+    argv: [just, install-hooks]
+    area: repo
+    operation: install
+    timeout_seconds: 60
+    description: Point git at the tracked commit-msg hook this repo's gate requires
+
 quality:
   checks:
     test_contracts:
