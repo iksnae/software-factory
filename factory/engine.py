@@ -75,6 +75,25 @@ def _require(step: StepConfig, field: str, where: str) -> None:
         raise WorkflowError(f"{where}: step kind {step.step!r} requires `{field}:`")
 
 
+def _require_agent_repair(step: StepConfig, where: str) -> None:
+    """A `repair` must be an agent step, because that is all execution can run.
+
+    `_verify_loop` and `_review_loop` pass `step.repair` straight to
+    `_agent_phase` without inspecting its kind, so a repair declared as any other
+    kind dies on its missing `output` after the loop has already paid for the
+    phase that preceded it. Validation used to judge a repair BY its kind and
+    accept `changes`, `commit`, or `quality` there — an asymmetry between what
+    the validator allowed and what the engine could execute.
+
+    Refusing it here keeps the two honest. Widening this is the correct place to
+    start if a non-agent repair ever becomes something the loops dispatch.
+    """
+    if step.step != "agent":
+        raise WorkflowError(
+            f"{where}: a repair must be `step: agent` — the loops hand it to the "
+            f"agent phase without checking its kind, so {step.step!r} cannot run there")
+
+
 def _validate_step(step: StepConfig, cfg, where: str, seen: set[str]) -> None:
     if step.name:
         if step.name in seen:
@@ -114,6 +133,7 @@ def _validate_step(step: StepConfig, cfg, where: str, seen: set[str]) -> None:
             raise WorkflowError(f"{where}: {error}") from error
         if step.step == "verify_loop":
             _require(step, "repair", where)
+            _require_agent_repair(step.repair, f"{where} -> repair")
             _validate_step(step.repair, cfg, f"{where} -> repair", seen)
     elif step.step == "review_loop":
         for field in ("name", "owner", "output"):
@@ -124,6 +144,7 @@ def _validate_step(step: StepConfig, cfg, where: str, seen: set[str]) -> None:
         if unknown:
             raise WorkflowError(f"{where}: unknown gate(s) {unknown}")
         if step.repair is not None:
+            _require_agent_repair(step.repair, f"{where} -> revise")
             _validate_step(step.repair, cfg, f"{where} -> revise", seen)
     elif step.step == "changes":
         _require(step, "name", where)
@@ -173,13 +194,21 @@ def validate(workflow: WorkflowConfig, cfg, name: str) -> None:
     # Caught here rather than at phase time, where it would surface as an empty
     # ref deep inside git plumbing after the run had already spent on agents.
     #
-    # Walks `repair` as well as `steps`. An earlier version walked only `steps`,
-    # so a `changes` step declared as a loop's `repair` passed validation and then
-    # measured against an unpinned baseline at phase time — the exact failure this
-    # guard exists to prevent, reached by the one path it did not look down.
-    # Probed: with `pin_baseline: false`, a top-level `changes` was refused while
-    # the same step nested in a `repair` validated clean. `required_agents` below
-    # already walks both and is the model to copy.
+    # Walks `repair` as well as `steps`, matching `required_agents` below. An
+    # earlier version walked only `steps`, so a `changes` step declared as a
+    # loop's `repair` passed validation — probed: with `pin_baseline: false` a
+    # top-level `changes` was refused while the same step nested in a `repair`
+    # validated clean.
+    #
+    # That gap could not actually reach a baseline comparison, and an earlier
+    # version of this comment wrongly claimed it did. `_verify_loop` and
+    # `_review_loop` hand a repair to `_agent_phase` WITHOUT looking at its kind
+    # (see their calls below), so a non-agent repair dies on its missing
+    # `output` long before any git work. The reachable defect was the asymmetry
+    # itself — validation judged a repair by its kind while execution ignored
+    # it — which `_require_agent_repair` now closes. This walk stays because it
+    # is the correct shape for a recursive check and because it must not be the
+    # thing standing between a future repair kind and this guard.
     def needs_baseline(steps: list[StepConfig]) -> bool:
         for step in steps:
             if step.step == "changes" and step.base == "baseline":
