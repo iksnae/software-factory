@@ -164,27 +164,53 @@ list" half is right. The source was wrong, and the probe is thirty seconds:
 # parent with one submodule; control run first, with .gitmodules present
 git ls-files --stage | awk '$1=="160000"{print $4}'   -> sub
 git config --file .gitmodules --get-regexp path        -> submodule.sub.path sub
-
-rm .gitmodules
-git ls-files --stage | awk '$1=="160000"{print $4}'    -> sub        # still there
-git submodule status                                   -> sub        # still enumerated
-git submodule foreach --quiet 'echo $sm_path'          -> sub        # still enumerated
-git config --file .gitmodules --get-regexp path        -> ''         # BLIND
 ```
 
-The gitlink lives in the **index** as a mode-`160000` entry. `.gitmodules` is a tracked
-convenience file carrying names and URLs, and deleting it removes neither the submodule nor
-git's own ability to enumerate it.
+Removal has **three** distinct states, and they do not behave alike — an earlier revision of
+this note probed only the first and generalised from it:
+
+| removal | `ls-files --stage` 160000 | `submodule status` / `foreach` | `config --file .gitmodules` |
+|---|---|---|---|
+| worktree only (`rm .gitmodules`) | `sub` | `sub`, exit 0 | `''` — blind |
+| also `rm --cached`, uncommitted | `sub` | `sub`, exit 0 | `''` — blind |
+| **committed removal** | **`sub`** | **exit 128, fatal** | `''` — blind |
+
+The third state's exact errors: `fatal: no submodule mapping found in .gitmodules for path
+'sub'` from `status`, and `fatal: No url found for submodule path 'sub' in .gitmodules` from
+`foreach`. `git submodule status` and `foreach` read `.gitmodules` from the worktree, falling
+back to the index, falling back to HEAD; they enumerate while *any* of the three still has it
+and fail once none does.
+
+The gitlink lives in the **index** as a mode-`160000` entry, and `ls-files --stage` answers in
+all three states. `.gitmodules` is a tracked convenience file carrying names and URLs.
+
+That third state is what makes the choice compelling rather than merely tidy: it is the state
+in which the entire `git submodule` command family is unusable and the index still answers.
 
 Two consequences:
 
 - **For a refusal — "does this root contain gitlinks?" — read the index.** A guard that asks
   `.gitmodules` answers "no submodules here" for a root that has them, which fails open on
   precisely the configuration it exists to reject.
-- **A `.gitmodules`-driven fan-out silently skips such a member.** The pattern this document
-  praised is still the right pattern for iterating *named* members, and it remains far better
-  than a literal list, but it is not a completeness check. Worth knowing before trusting it as
-  one.
+- **A `.gitmodules`-driven fan-out silently skips such a member**, and in the committed-removal
+  state it does worse than skip: `submodule status` and `foreach` exit 128, so a fan-out built
+  on either fails outright rather than under-reporting. The pattern this document praised is
+  still the right one for iterating *named* members and remains far better than a literal list,
+  but it is not a completeness check and it is not a safety predicate.
+
+Two further limits on mode `160000`, established while reviewing a design that leaned on it:
+
+- **Over-broad.** A deinitialised submodule (`git submodule deinit`) still has its gitlink, but
+  its directory is empty — nothing can be dirty, `add -A` stages nothing for it, and no
+  enforcement blindness applies. A parent cloned without `--recursive` is in exactly that state,
+  so a guard keyed on gitlink presence alone refuses the most ordinary checkout there is.
+- **Fail-open, because presence is not static.** `git add -A` MINTS gitlinks: an unregistered
+  embedded repository — from a `git init` in a subdirectory, an agent cloning something, or a
+  `prepare:` step vendoring a checkout — reads `?? nested/` before and `A nested` at mode
+  `160000` after. So a tree with no gitlinks at admission can acquire one and commit a pointer
+  to a commit that exists on no other machine, with no `.gitmodules` entry and no URL to recover
+  it from. A clone gets an empty directory. This is not specific to a superproject root; it
+  reaches any run that commits.
 
 ### S7 deserves its own note
 
