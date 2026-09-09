@@ -1,0 +1,92 @@
+# khaos-publisher's factory config.
+#
+# Copy this to ~/Projects/khaos-publisher/sssf.config.yaml, or drive it in place:
+#   sf check --repo ~/Projects/khaos-publisher \
+#            --config examples/khaos-publisher.sssf.yaml
+#
+# Every timeout below is roughly 20x a measured run on this machine, so a slow
+# day does not read as a failure:
+#   npm run test:contracts     8s
+#   npm run test:scripts       3s
+#   npm run typecheck          4s
+#   npm run check:code-health  <1s
+#   npm run validate:contracts <1s
+#   npm run check:docs         <1s
+#   npm test                  11s  — and see the warning under `groups:`
+
+extends: config/rosters/codex-open.yaml
+
+paths:
+  # This repo keeps curated documentation in docs/ (docs/adr, ARCHITECTURE.md,
+  # …), so factory output is kept out of that root rather than mixed into it.
+  specs: docs/specs/
+  docs: docs/runs/
+
+quality:
+  checks:
+    test_contracts:
+      argv: [npm, run, test:contracts]
+      area: contracts
+      operation: test
+      timeout_seconds: 180
+      description: node --test over experiments/*.test.mjs
+
+    test_scripts:
+      argv: [npm, run, test:scripts]
+      area: scripts
+      operation: test
+      timeout_seconds: 120
+      description: node --test over scripts/**/*.test.mjs
+
+    typecheck:
+      argv: [npm, run, typecheck]
+      area: app
+      operation: typecheck
+      timeout_seconds: 300
+
+    code_health:
+      argv: [npm, run, check:code-health]
+      area: repo
+      operation: lint
+      timeout_seconds: 120
+
+    validate_contracts:
+      argv: [npm, run, validate:contracts]
+      area: contracts
+      operation: lint
+      timeout_seconds: 120
+
+    docs_check:
+      argv: [npm, run, check:docs]
+      area: repo
+      operation: lint
+      timeout_seconds: 120
+
+    # The whole suite across every workspace. NOT in the `test` group on purpose
+    # — see below.
+    test_all:
+      argv: [npm, test]
+      area: app
+      operation: test
+      timeout_seconds: 900
+      description: every workspace suite; the repo's own definition of green
+
+  groups:
+    # What the verify loop re-runs after every builder repair. It must be FAST
+    # and it must be GREEN before the factory starts, or the builder spends its
+    # whole repair budget on a failure it did not cause.
+    #
+    # `npm test` is excluded because on main, today, it FAILS: apps/console's
+    # profile-card tests raise ERR_MODULE_NOT_FOUND for
+    # @kpublish/profile-card-renderer-experiment, which is declared in the root
+    # `workspaces` but not linked under node_modules/@kpublish/. Run `npm
+    # install` at the root to link it, confirm `npm test` is green, then move
+    # test_all into this group where it belongs.
+    test: [test_contracts, test_scripts]
+
+    # What the `quality` workflow runs. Deliberately not `npm run check`: that
+    # chain includes check:production-release, check:threshold, check:install
+    # and check:runner-compatibility, which reach for AWS and release state —
+    # not something an agent loop should be triggering.
+    full: [test_contracts, test_scripts, typecheck,
+           code_health, validate_contracts, docs_check]

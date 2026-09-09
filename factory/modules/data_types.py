@@ -534,6 +534,12 @@ class PiRequest(BaseModel):
     tools: Optional[list[str]] = None
     extensions: list[str] = Field(default_factory=list)
     cwd: str = "."                  # set from run.repo_root — the codebase root agents work in
+    # OS-level write boundary, honoured by harnesses that have one (codex
+    # --sandbox). Derived from `writes`: an agent permitted to change nothing gets
+    # a sandbox that CANNOT, instead of a promise that it will not. It does not
+    # replace permissions.py — a sandbox can express "no writes at all", not
+    # "only specs/", so the after-the-fact check still runs.
+    sandbox: str = ""
 
 
 class UsageBreakdown(BaseModel):

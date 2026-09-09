@@ -15,10 +15,10 @@ from typing import Optional
 
 import yaml
 
-from . import agent_pi, permissions, prompts
+from . import agent_cc, agent_codex, agent_pi, permissions, prompts
 from .data_types import (AgentCall, AgentConfig, EnvelopeBase, EventRecord,
-                         GateCheck, GateReport, Phase, PiRequest, SSSFConfig,
-                         UsageBreakdown)
+                         GateCheck, GateReport, Phase, PiRequest, PiResult,
+                         SSSFConfig, UsageBreakdown)
 from .utils import new_id
 
 # Fallback only. The live value is cfg.limits.json_fix_attempts, read per run —
@@ -33,6 +33,30 @@ INHERITED = ("coding_agent", "model", "thinking", "color", "tools", "writes")
 # should need; anything past this is a loop or a mistake, and both deserve the
 # same clear error rather than a RecursionError.
 MAX_EXTENDS_DEPTH = 5
+
+
+# Which module drives which harness. Every entry must expose the same four
+# names — resolve_model, assistant_message_records, ToolCallTracker, run — which
+# is what lets `execute` below stay harness-agnostic instead of branching.
+#
+# `claude_code` is still the stub it always was: listed so a config naming it
+# fails with one clear sentence rather than a KeyError.
+HARNESSES = {
+    "pi": agent_pi,
+    "codex": agent_codex,
+    "claude_code": agent_cc,
+}
+
+IMPLEMENTED = ("pi", "codex")
+
+
+def harness(agent: AgentConfig):
+    """The module that runs this agent. Raises SystemExit on an unusable choice."""
+    module = HARNESSES.get(agent.coding_agent)
+    if module is None:
+        raise SystemExit(f"agent {agent.name!r}: unknown coding_agent "
+                         f"{agent.coding_agent!r} — available: {sorted(HARNESSES)}")
+    return module
 
 
 class GateFailure(RuntimeError):
@@ -177,15 +201,19 @@ def validate(cfg: SSSFConfig, required: list[str]) -> None:
         except SystemExit as e:
             problems.append(str(e))
             continue
-        if agent.coding_agent != "pi":
+        if agent.coding_agent not in IMPLEMENTED:
             problems.append(f"agent {name!r}: coding_agent {agent.coding_agent!r} "
-                            f"is not implemented in v1 (pi only)")
+                            f"is not implemented — available: {list(IMPLEMENTED)}")
+            continue                 # its model cannot be resolved either
         for label, ref in (("system", agent.prompt_engineering.system),
                            ("user", agent.prompt_engineering.user)):
             if not Path(ref).is_file():
                 problems.append(f"agent {name!r}: {label} prompt not found: {ref}")
         try:
-            agent_pi.resolve_model(agent.model)
+            # Each harness validates model ids its own way: pi against the merged
+            # `pi --list-models` catalog, codex against its allowlist. Asking the
+            # wrong one is how a valid subscription model gets reported missing.
+            harness(agent).resolve_model(agent.model)
         except ValueError as e:
             problems.append(f"agent {name!r}: {e}")
     if problems:
@@ -197,6 +225,7 @@ def validate(cfg: SSSFConfig, required: list[str]) -> None:
 def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
     """One agent call: render prompts -> pi run -> typed parse -> gates -> envelope."""
     agent = resolve(run.cfg, phase.params.owner)
+    module = harness(agent)                  # pi or codex; same four names either way
     agent_dir = run.session_dir / agent.name
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -232,10 +261,10 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
     # Parse retries and gate corrections re-enter the SAME pi session, so the
     # last send is the one whose context occupancy is current — while spend is
     # the opposite: every send costs, so usage accumulates across all of them.
-    latest: agent_pi.PiResult | None = None
+    latest: PiResult | None = None
     spent = UsageBreakdown()
 
-    def send(prompt_text: str) -> agent_pi.PiResult:
+    def send(prompt_text: str) -> PiResult:
         nonlocal latest
         request = PiRequest(
             prompt=prompt_text,
@@ -244,15 +273,18 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
             thinking=agent.thinking,
             session_id=session_id,
             # absolute: these are read by the pi subprocess, which runs in repo_root
-            session_dir=str((agent_dir / "pi_sessions").resolve()),
+            # Per harness, because the two keep different things here: pi its own
+            # session files, codex the thread id that a resume needs.
+            session_dir=str((agent_dir / f"{agent.coding_agent}_sessions").resolve()),
             raw_output_path=str((agent_dir / "raw_output.jsonl").resolve()),
             tools=agent.tools,
             extensions=agent.harness_engineering,
             cwd=str(run.repo_root),
+            sandbox=_sandbox_for(agent),
         )
-        result = agent_pi.run(
+        result = module.run(
             request,
-            on_event=_event_forwarder(run, phase, agent.name),
+            on_event=_event_forwarder(run, phase, agent.name, module),
             on_spawn=lambda pid: run.tracer.process_start(
                 run.adw_id, "agent", agent.name, pid,
                 f"{agent.coding_agent} {agent.name} {agent.model}"),
@@ -363,15 +395,27 @@ def _agent_session_id(run, agent: AgentConfig) -> str:
     return f"sssf-{run.adw_id}-{agent.name}-{new_id(4)}"
 
 
-def _event_forwarder(run, phase: Phase, agent_name: str):
+def _sandbox_for(agent: AgentConfig) -> str:
+    """An agent that may change nothing in the repo gets a read-only sandbox.
+
+    `writes: []` was previously only detectable after the fact. Where a harness
+    can enforce it (codex --sandbox), it now also cannot happen. Anything more
+    specific than "nothing at all" — `writes: ["specs/"]` — is beyond what a
+    sandbox can express, so those still rely on permissions.py.
+    """
+    return agent_codex.SANDBOX_READ_ONLY if agent.writes == [] \
+        else agent_codex.SANDBOX_WRITE
+
+
+def _event_forwarder(run, phase: Phase, agent_name: str, module):
     """One tool_call event per real tool call, with its exact args and result —
     plus one thinking / one agent_message event per COMPLETE assistant message.
     Complete messages only, never message_update deltas: the extraction reads
     message_end alone (see agent_pi.assistant_message_records)."""
-    tracker = agent_pi.ToolCallTracker()
+    tracker = module.ToolCallTracker()
 
     def forward(event: dict) -> None:
-        for message in agent_pi.assistant_message_records(event):
+        for message in module.assistant_message_records(event):
             run.tracer.event(EventRecord(adw_id=run.adw_id, phase_id=phase.phase_id,
                                          type=message.pop("kind"),
                                          name=message.pop("label"),

@@ -30,9 +30,21 @@ echo "OPENROUTER_API_KEY=sk-or-..." > .env
 just config doctor            # git, uv, pi, key, model resolution, check binaries
 ```
 
-`pi` needs an OpenRouter key and nothing else. It ships its own model catalog —
-if `pi --list-models` shows the models your roster names, you are done; no
-`models.json` editing required.
+`pi` is the harness and it owns the model catalog: it ships a live-fetched store
+of hundreds of models, so if `pi --list-models` shows what your roster names, you
+are done — **no `models.json` editing required**, and editing it to "add" a model
+the store already has just duplicates it with prices that drift.
+
+Auth is per provider. `OPENROUTER_API_KEY` covers `openrouter/…`; the
+`openai-codex/…` models come from a ChatGPT subscription that pi authenticates
+over OAuth, with no key in `.env`. Check what you have:
+
+```bash
+pi --list-models | awk '$1=="openai-codex"{print $2}'   # subscription models
+```
+
+`codex` (the CLI) is optional — only `coding_agent: codex` needs it. See
+[`docs/MODELS.md`](docs/MODELS.md).
 
 ## Use it on a repo
 
@@ -84,8 +96,34 @@ quality:
     full: [test]
 ```
 
-Full reference: [`docs/CONFIG.md`](docs/CONFIG.md). Worked example against a real
-app: [`examples/inkwell.sssf.yaml`](examples/inkwell.sssf.yaml).
+Full reference: [`docs/CONFIG.md`](docs/CONFIG.md). Models, providers, and
+harnesses: [`docs/MODELS.md`](docs/MODELS.md). Worked examples:
+[`examples/inkwell.sssf.yaml`](examples/inkwell.sssf.yaml) (Bun app) and
+[`examples/khaos-publisher.sssf.yaml`](examples/khaos-publisher.sssf.yaml) (npm
+workspace monorepo).
+
+## Models
+
+`model:` is `<pi-provider>/<model-id>`, validated against `pi --list-models`
+before a run starts. Six rosters ship; `just config rosters` lists them.
+
+```bash
+sf run sdlc "<work>" --repo . --roster codex-open
+```
+
+`codex-open` staffs judgement from a ChatGPT subscription and code from open
+weights, with no Anthropic models:
+
+| lane | model | billing |
+| --- | --- | --- |
+| planner | `openai-codex/gpt-6-astra` | subscription |
+| reviewer | `openai-codex/gpt-5.6-sol` | subscription |
+| builder | `openrouter/moonshotai/kimi-k3` | metered |
+| scout, documenter | `openrouter/deepseek/deepseek-v4-flash-0731` | metered |
+
+Subscription lanes report real tokens and `$0.0000` — that billing is not metered
+per token, so `just obs costs` is metered spend, not total usage. Details, plus
+how to add providers or local models, in [`docs/MODELS.md`](docs/MODELS.md).
 
 ## Workflows
 
@@ -135,16 +173,24 @@ The original repo's main failure was documentation that outran the code, so:
 resolution across two roots works. The `quality` workflow runs end to end against
 a scratch repo — phases open and close, checks execute, artifacts land, the trace
 records, and a red check fails the *run* (exit 1) while the phase that ran it
-still succeeds. All five rosters validate and every model they name resolves
-through `pi`.
+still succeeds. All six rosters validate and every model they name resolves
+through `pi`, including the subscription models on `codex-open`.
 
 **Not yet exercised.** No agent-driven workflow has been run from this checkout,
 because that spends money. The agent path is the original's code, ported with the
 config and path changes described here; treat the first `sdlc` run as the real
 test. Run it on a `git worktree` (`just worktree`).
 
-**Known limits, carried over.** `coding_agent: claude_code` is a stub that raises —
-pi only. `--owner` applies only to workflows with exactly one agent step.
+**`coding_agent: codex` is present but UNVERIFIED.** The Codex CLI adapter
+(`factory/modules/agent_codex.py`) was written against two live probe runs of
+`codex exec --json` — event shapes, usage mapping, and thread resume are real, but
+no workflow has run through it. Its draw is that `--sandbox read-only` makes
+`writes: []` an OS boundary instead of an after-the-fact check. The same models
+are reachable on the verified path with `coding_agent: pi` and an
+`openai-codex/…` model, so prefer that unless you want the sandbox.
+
+**Known limits, carried over.** `coding_agent: claude_code` is still a stub that
+raises. `--owner` applies only to workflows with exactly one agent step.
 `best-of-n` is sequential, because parallel runs against one working tree would
 fight over the same files.
 
