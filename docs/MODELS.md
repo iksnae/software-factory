@@ -63,16 +63,30 @@ gpt-6-astra    gpt-5.6-sol    gpt-5.6-terra    gpt-5.6-luna
 gpt-5.5        gpt-5.4        gpt-5.4-mini     gpt-5.3-codex-spark
 ```
 
-**These lanes report real tokens and `$0.0000` cost.** That is correct, not a
-bug: subscription billing is not metered per token, so no cost exists to record.
-The consequence is that `just obs costs` on a mixed roster shows OpenRouter spend
-only — read it as metered spend, never as total usage.
+Subscription lanes still report a dollar figure through pi, and it is NOTIONAL: pi
+prices every turn from its catalog's list rates, so an `openai-codex/…` lane shows
+what those tokens WOULD have cost on the metered API, not what your subscription
+was charged. A measured planning phase reported $5.72 for 3.7M tokens (3.58M of
+them cache reads) against a flat-rate subscription. Read those numbers as usage
+weight, not as an invoice. Only the `coding_agent: codex` CLI path reports
+$0.0000, because Codex's own `usage` object carries no cost field at all.
 
 ### `openrouter` — open-weight models only
 
-This setup uses OpenRouter **exclusively** for open weights: Kimi K3, GLM-5.2,
-DeepSeek, and similar. Needs `OPENROUTER_API_KEY` in `.env` (the factory reads
-the factory checkout's `.env`, then the target repo's, repo winning).
+This setup uses OpenRouter **exclusively** for open weights. Needs
+`OPENROUTER_API_KEY` in `.env` (the factory reads the factory checkout's `.env`,
+then the target repo's, repo winning).
+
+Prefer a DIRECT provider where pi has one, because it skips OpenRouter's margin on
+the same weights. On this host `deepseek` and `moonshotai` are authenticated
+directly, so `deepseek/deepseek-v4-pro` and `moonshotai/kimi-k3` beat routing the
+same models through OpenRouter. `z-ai` has no direct provider, so GLM must go
+through it.
+
+The tradeoff: direct providers expose UNDATED ids only (`deepseek-v4-pro`, never
+`-0813`). Those are rolling aliases, so two best-of-N runs months apart are not
+comparing the same weights. When reproducibility matters more than margin, pin
+OpenRouter's dated id instead.
 
 OpenRouter also *lists* closed models — `openrouter/openai/gpt-6-astra` resolves
 fine. Routing those through it would pay per token for a model the subscription

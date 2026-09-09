@@ -14,7 +14,7 @@
 #   npm run check:docs         <1s
 #   npm test                  11s  — and see the warning under `groups:`
 
-extends: config/rosters/codex-open.yaml
+extends: config/rosters/open-weights.yaml
 
 paths:
   # This repo keeps curated documentation in docs/ (docs/adr, ARCHITECTURE.md,
@@ -90,3 +90,41 @@ quality:
     # not something an agent loop should be triggering.
     full: [test_contracts, test_scripts, typecheck,
            code_health, validate_contracts, docs_check]
+
+# ─── model staffing overrides ─────────────────────────────────────────────────
+# All open weights, and nothing here depends on a subscription quota.
+#
+# Routed FIRST-PARTY where pi is authenticated for the provider directly
+# (`deepseek`, `moonshotai` — check with `pi --list-models | awk '$1=="deepseek"'`),
+# because that skips OpenRouter's margin on the same weights. `z-ai` has no direct
+# provider, so GLM stays on OpenRouter — which is the rule anyway: OpenRouter for
+# open models, and here for the one open model that has no direct route.
+#
+# The tradeoff, stated because it is easy to lose: the direct providers expose
+# UNDATED ids only (`deepseek-v4-pro`, not `-0813`). Those are rolling aliases, so
+# a best-of-N comparison run months apart is not comparing the same weights. Pin
+# through OpenRouter's dated ids instead when reproducibility matters more than
+# margin: openrouter/deepseek/deepseek-v4-pro-0813.
+agents:
+  # DeepSeek v4 Pro replaces GPT-6-Astra on the plan. The plan is the
+  # highest-leverage artifact — the builder implements it without re-deciding
+  # anything — so the strongest non-subscription model goes here.
+  - name: planner
+    model: deepseek/deepseek-v4-pro
+    thinking: high
+
+  - name: builder
+    model: moonshotai/kimi-k3          # 1M context, strong tool use, direct
+
+  - name: scout
+    model: deepseek/deepseek-v4-flash  # mechanical recon, direct
+
+  - name: documenter
+    model: deepseek/deepseek-v4-flash  # one long diff read, direct
+
+  # GLM 5.3 Flash on the verdict: chosen for pricing/performance, and it keeps the
+  # 1M window the reviewer needs to read a whole diff against a whole plan.
+  # OpenRouter is the only route — z-ai exposes no direct provider to pi.
+  - name: reviewer
+    model: openrouter/z-ai/glm-5.3-flash
+    thinking: high

@@ -121,9 +121,10 @@ weights, with no Anthropic models:
 | builder | `openrouter/moonshotai/kimi-k3` | metered |
 | scout, documenter | `openrouter/deepseek/deepseek-v4-flash-0731` | metered |
 
-Subscription lanes report real tokens and `$0.0000` — that billing is not metered
-per token, so `just obs costs` is metered spend, not total usage. Details, plus
-how to add providers or local models, in [`docs/MODELS.md`](docs/MODELS.md).
+Costs in the trace are computed from catalog list rates, so a subscription lane's
+dollar figure is notional — what those tokens would have cost metered, not what you
+were billed. Details, plus how to add providers or local models, in
+[`docs/MODELS.md`](docs/MODELS.md).
 
 ## Workflows
 
@@ -176,10 +177,16 @@ records, and a red check fails the *run* (exit 1) while the phase that ran it
 still succeeds. All six rosters validate and every model they name resolves
 through `pi`, including the subscription models on `codex-open`.
 
-**Not yet exercised.** No agent-driven workflow has been run from this checkout,
-because that spends money. The agent path is the original's code, ported with the
-config and path changes described here; treat the first `sdlc` run as the real
-test. Run it on a `git worktree` (`just worktree`).
+**The agent path is verified too, once.** A `plan` workflow ran end to end against
+a real npm monorepo: 16m45s, one agent phase, 3.7M tokens, and a 51KB spec written
+to the configured `specs:` directory — with the planner's `writes` allowlist
+holding, so nothing else in that repo was touched. Gates passed, the trace recorded
+every tool call, and the session closed clean.
+
+**Still unexercised: the loops.** No run has yet driven `verify_loop` (a failing
+check going back to the builder), `review_loop`, or any commit phase. Those are the
+original's code with the config changes described here. Run the first one on a
+`git worktree` (`just worktree`), not on a branch you care about.
 
 **`coding_agent: codex` is present but UNVERIFIED.** The Codex CLI adapter
 (`factory/modules/agent_codex.py`) was written against two live probe runs of
