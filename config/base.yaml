@@ -1,0 +1,359 @@
+# base.yaml — what every target repo inherits: the stock phase graphs, the loop
+# bounds, and the engine-wide defaults. NO agents and NO quality checks live
+# here, because those are the two things that are genuinely per-repo:
+#
+#   agents   come from a roster (config/rosters/*.yaml) — model staffing
+#   quality  comes from the repo itself — nobody else knows its test command
+#
+# A repo's own config extends a roster, which extends this file. Three layers,
+# each answering one question: what runs (here), who runs it (roster), against
+# what (the repo).
+
+defaults:
+  coding_agent: pi
+  thinking: medium
+  harness_engineering: []
+  # Reachable-and-worth-protecting only. The engine itself lives outside the
+  # target repo now, so `writes` cannot reach it at all — a structural guarantee
+  # that replaces the old pattern list. What remains is the repo's own factory
+  # surface: an agent must not edit the config that decides how it is judged.
+  protected_files:
+    - sssf.config.yaml
+    - .sssf/
+  data_dir: .sssf/data
+
+observability:
+  db: .sssf/data/sssf.db
+  poll_ms: 500
+
+# Loop bounds and truncation ceilings. These were module constants at the top of
+# each ADW script (MAX_FIX_LOOPS, MAX_REVISION_LOOPS, JSON_FIX_ATTEMPTS), so a
+# repo that wanted a longer repair budget had to edit a workflow every other repo
+# shared. Override any of them in your own config.
+limits:
+  max_fix_loops: 3
+  max_revision_loops: 2
+  json_fix_attempts: 2
+  max_diff_lines: 2000
+
+# Where work products land. Prompts reference these, so a repo that keeps specs
+# under docs/rfcs/ says so once here instead of editing agent prompts.
+paths:
+  specs: specs/
+  docs: docs/
+
+# ─── stock workflows ─────────────────────────────────────────────────────────
+# One entry per Python file the original factory shipped. Same phases, same
+# gates, same bounds — declared instead of coded, so a repo can retune one
+# without forking all of them.
+
+workflows:
+
+  scout:
+    description: Read-only recon. Just looking for stuff.
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: scout
+        owner: scout
+        output: ScoutOutput
+        gates: [artifacts_exist]
+        description: Find and report where things live — change nothing
+
+  ask:
+    description: One agent, one prompt. Override the agent with --owner.
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: answer
+        owner: builder
+        output: GenericOutput
+        description: Answer the ask directly, with no surrounding chain
+
+  plan:
+    description: Turn a request into an implementable spec. No code.
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: plan
+        owner: planner
+        output: PlanOutput
+        gates: [artifacts_exist, files_non_empty]
+        description: Turn the request into an implementable plan
+
+  build:
+    description: One-shot implementation, no plan and no verification.
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: build
+        owner: builder
+        output: BuildOutput
+        gates: [diff_matches_claims]
+        description: Implement the request directly
+
+  plan_build:
+    description: Planner then builder. No verification.
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: plan
+        owner: planner
+        output: PlanOutput
+        gates: [artifacts_exist, files_non_empty]
+        description: Turn the request into an implementable plan
+      - step: agent
+        name: build
+        owner: builder
+        output: BuildOutput
+        previous: plan
+        gates: [diff_matches_claims]
+        description: Implement the plan exactly
+
+  build_test:
+    description: Builder, then the suite with a bounded repair loop.
+    accept: verified
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: build
+        owner: builder
+        output: BuildOutput
+        gates: [diff_matches_claims]
+        description: Implement the request directly
+      - step: verify_loop
+        name: test
+        group: test
+        description: Run the suite — a known command, so code runs it and no agent
+                     has to rediscover it
+        repair:
+          step: agent
+          name: fix
+          owner: builder
+          output: BuildOutput
+          gates: [diff_matches_claims]
+          retries: 1
+          description: Repair what the suite reported, from its verbatim output
+
+  build_review:
+    description: Builder, then a reviewer with a bounded revision loop.
+    accept: verified
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: build
+        owner: builder
+        output: BuildOutput
+        gates: [diff_matches_claims]
+        description: Implement the request directly
+      - step: review_loop
+        name: review
+        owner: reviewer
+        output: ReviewOutput
+        previous: build
+        gates: [artifacts_exist, verdict_consistent]
+        description: Confirm the build is what was actually asked for
+        repair:
+          step: agent
+          name: revise
+          owner: builder
+          output: BuildOutput
+          gates: [diff_matches_claims]
+          retries: 1
+          description: Close the reviewer's blocking findings
+
+  quality:
+    description: Deterministic checks only — no agent runs at all.
+    accept: verified
+    steps:
+      - step: request
+        description: Capture why quality verification was requested
+      - step: quality
+        name: quality
+        group: full
+        description: Run every deterministic check this repo declares
+
+  document:
+    description: Write up work already done, from the diff against main.
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: changes
+        name: changes
+        base: main
+        description: Diff the working tree against main — the change to be written up
+      - step: agent
+        name: document
+        owner: documenter
+        output: DocumentOutput
+        previous: changes
+        gates: [artifacts_exist, files_non_empty]
+        retries: 1
+        description: Turn the captured diff into a write-up an engineer can read
+
+  sdlc:
+    description: Plan, build, then the suite with a bounded repair loop.
+    accept: verified
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: plan
+        owner: planner
+        output: PlanOutput
+        gates: [artifacts_exist, files_non_empty]
+        description: Turn the request into an implementable plan
+      - step: agent
+        name: build
+        owner: builder
+        output: BuildOutput
+        previous: plan
+        gates: [diff_matches_claims]
+        description: Implement the plan exactly
+      - step: verify_loop
+        name: test
+        group: test
+        description: Run the suite — a known command, so code runs it and no agent
+                     has to rediscover it
+        repair:
+          step: agent
+          name: fix
+          owner: builder
+          output: BuildOutput
+          gates: [diff_matches_claims]
+          retries: 1
+          description: Repair what the suite reported, from its verbatim output
+
+  sdlc_quality:
+    description: sdlc, plus every deterministic check at the end.
+    accept: verified
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: plan
+        owner: planner
+        output: PlanOutput
+        gates: [artifacts_exist, files_non_empty]
+        description: Turn the request into an implementable plan
+      - step: agent
+        name: build
+        owner: builder
+        output: BuildOutput
+        previous: plan
+        gates: [diff_matches_claims]
+        description: Implement the plan exactly
+      - step: verify_loop
+        name: test
+        group: test
+        description: Run the suite before the wider checks — the fastest signal first
+        repair:
+          step: agent
+          name: fix
+          owner: builder
+          output: BuildOutput
+          gates: [diff_matches_claims]
+          retries: 1
+          description: Repair what the suite reported, from its verbatim output
+      - step: quality
+        name: quality
+        group: full
+        when: verified
+        description: Lint, typecheck and build once the suite is green
+
+  simple_sdlc:
+    description: Plan, build, test, review, document — three commits, three authors.
+    accept: verified
+    accept_reason: the suite or the review never came back clean
+    # Pinned before the first commit phase: by then the run has moved the branch
+    # itself, so "what changed" would be measured against its own output.
+    pin_baseline: true
+    steps:
+      - step: request
+        description: Capture the incoming ask
+      - step: agent
+        name: plan
+        owner: planner
+        output: PlanOutput
+        gates: [artifacts_exist, files_non_empty]
+        description: Turn the request into an implementable plan
+      - step: commit
+        name: commit_plan
+        source: plan
+        description: Put the spec on record before any code exists to blur it
+      - step: agent
+        name: build
+        owner: builder
+        output: BuildOutput
+        previous: plan
+        gates: [diff_matches_claims]
+        description: Implement the plan exactly
+      - step: verify_loop
+        name: test
+        group: test
+        description: Run the suite — a known command, so code runs it and no agent
+                     has to rediscover it
+        repair:
+          step: agent
+          name: fix
+          owner: builder
+          output: BuildOutput
+          gates: [diff_matches_claims]
+          retries: 1
+          description: Repair what the suite reported, from its verbatim output
+      - step: review_loop
+        name: review
+        owner: reviewer
+        output: ReviewOutput
+        previous: build
+        gates: [artifacts_exist, verdict_consistent]
+        description: Confirm the build matches the plan
+        repair:
+          step: agent
+          name: revise
+          owner: builder
+          output: BuildOutput
+          gates: [diff_matches_claims]
+          retries: 1
+          description: Close the reviewer's blocking findings
+      # A revision edited code after the suite last ran, so that green result is
+      # stale. Re-earn it rather than commit on a verdict that predates the change.
+      - step: quality
+        name: retest
+        group: test
+        when: revised_and_approved
+        description: Re-run the suite after a revision changed code post-green
+      # Red checks or a rejected review stop the chain here: the code stays
+      # uncommitted and nothing is documented, because there is nothing worth
+      # describing yet. The plan commit stands — it records what was asked.
+      - step: group
+        when: verified
+        description: Land, measure, and write up a change that passed both questions
+        steps:
+          - step: commit
+            name: commit_build
+            source: build
+            description: Land the code only now — green checks, approved review
+          - step: changes
+            name: changes
+            base: baseline
+            description: Diff the whole run against its pinned baseline, for the documenter
+          - step: agent
+            name: document
+            owner: documenter
+            output: DocumentOutput
+            previous: changes
+            gates: [artifacts_exist, files_non_empty]
+            retries: 1
+            description: Write up the completed change
+          - step: commit
+            name: commit_docs
+            source: document
+            description: Ship the write-up in its own commit, beside the code it describes

@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Run artifacts never belong to the factory — they live in the TARGET repo's
+# .sssf/data/. This entry is a backstop for the case where someone points
+# --repo at this checkout while testing.
+.sssf/
+sssf.db*
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

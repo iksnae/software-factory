@@ -1,0 +1,80 @@
+# sssf.config.yaml — this repo's factory config. Written by `sf init`.
+#
+# Three layers, and this is the third:
+#   config/base.yaml      what runs   — the stock workflows, loop bounds, paths
+#   config/rosters/*.yaml who runs it — model staffing per agent
+#   THIS FILE             against what — your commands, your paths, your overrides
+#
+# Everything below is inherited unless you state otherwise. Delete what you do
+# not need; the file is meant to stay short.
+
+extends: {{roster}}
+
+# ─── REQUIRED: your deterministic checks ─────────────────────────────────────
+# A known command is not a judgement call. Write each one down once here and the
+# factory runs it as a subprocess — milliseconds, free, same answer every time.
+# An agent rediscovering your test command costs ~1M tokens and 85s per run.
+#
+# `{outdir}` in any argv element becomes a per-check output directory inside the
+# session, for commands that need somewhere to write a bundle.
+#
+# Nothing here is guessed for you: a factory that assumed `npm test` would be
+# confidently wrong in most repos. Replace these two and delete the rest.
+
+quality:
+  checks:
+    test:
+      argv: [echo, "REPLACE ME — no test command configured"]
+      area: app
+      operation: test
+      timeout_seconds: 600
+      description: The suite the verify loop runs after every build
+
+    # lint:
+    #   argv: [bun, x, oxlint@1.36.0, src/]
+    #   operation: lint
+    # typecheck:
+    #   argv: [bun, build, --target=bun, src/index.ts, --outdir, "{outdir}"]
+    #   operation: typecheck
+
+  # Named sets a workflow step can ask for. `test` and `full` are the two the
+  # stock workflows reference, so keep both defined even if they overlap.
+  groups:
+    test: [test]
+    full: [test]
+
+# ─── OPTIONAL: where work products land ──────────────────────────────────────
+# paths:
+#   specs: specs/
+#   docs: docs/
+
+# ─── OPTIONAL: loop bounds ───────────────────────────────────────────────────
+# limits:
+#   max_fix_loops: 3
+#   max_revision_loops: 2
+
+# ─── OPTIONAL: override one agent without restating the roster ───────────────
+# Agents merge BY NAME, so this changes only the builder's model.
+# agents:
+#   - name: builder
+#     model: openrouter/anthropic/claude-sonnet-5
+
+# ─── OPTIONAL: your own workflow ─────────────────────────────────────────────
+# Workflows merge by name too, so this ADDS one without touching the stock set.
+# workflows:
+#   smoke:
+#     description: Build, then only the fast checks.
+#     accept: verified
+#     steps:
+#       - step: request
+#         description: Capture the incoming ask
+#       - step: agent
+#         name: build
+#         owner: builder
+#         output: BuildOutput
+#         gates: [diff_matches_claims]
+#         description: Implement the request directly
+#       - step: quality
+#         name: smoke
+#         checks: [test]
+#         description: Run only the suite, skipping the wider checks

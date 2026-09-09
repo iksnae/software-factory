@@ -1,0 +1,72 @@
+# examples/inkwell.sssf.yaml — the Inkwell app's config, as a worked reference.
+#
+# This is the file that replaces `adws/adw_modules/quality.py`. In the original
+# factory those seven commands were seven Python functions with hardcoded argv,
+# which is how a rename (`run_quality` -> `run_inkwell_quality`) left two ADWs
+# calling a function that no longer existed — an AttributeError that only
+# surfaced when a run reached that phase. Named entries are resolved when the
+# config loads, so the same mistake is now a startup error naming the check.
+#
+# Point it at a checkout of the Inkwell repo:
+#   sf check --repo ~/Developer/inkwell-... --config examples/inkwell.sssf.yaml
+#
+# Nothing here mentions a VM, an account, or a provisioning key. The factory runs
+# on this machine against a directory.
+
+extends: config/rosters/default.yaml
+
+paths:
+  specs: specs/
+  docs: app_docs/
+
+quality:
+  checks:
+    test:
+      argv: [bun, test, apps/inkwell/server.test.ts]
+      area: backend
+      operation: test
+      timeout_seconds: 600
+      description: The 30-test API suite — the payload's definition of "does it run"
+
+    frontend_lint:
+      argv: [bun, x, "oxlint@1.36.0", apps/inkwell/public/app.js]
+      area: frontend
+      operation: lint
+
+    backend_lint:
+      argv: [bun, x, "oxlint@1.36.0", apps/inkwell/server.ts]
+      area: backend
+      operation: lint
+
+    # "typecheck" is the strongest zero-config Bun-native syntax/import check
+    # available for these sources; the app carries no local package toolchain.
+    frontend_typecheck:
+      argv: [bun, build, --target=browser, apps/inkwell/public/app.js,
+             --outdir, "{outdir}"]
+      area: frontend
+      operation: typecheck
+
+    backend_typecheck:
+      argv: [bun, build, --target=bun, apps/inkwell/server.ts, --outdir, "{outdir}"]
+      area: backend
+      operation: typecheck
+
+    frontend_build:
+      argv: [bun, build, --target=browser, --minify, apps/inkwell/public/app.js,
+             --outdir, "{outdir}"]
+      area: frontend
+      operation: build
+
+    backend_build:
+      argv: [bun, build, --target=bun, --minify, apps/inkwell/server.ts,
+             --outdir, "{outdir}"]
+      area: backend
+      operation: build
+
+  groups:
+    # What the verify loop re-runs after every repair: the fastest true signal.
+    test: [test]
+    # What the `quality` workflow runs: everything, including the suite.
+    full: [test, frontend_lint, backend_lint,
+           frontend_typecheck, backend_typecheck,
+           frontend_build, backend_build]
