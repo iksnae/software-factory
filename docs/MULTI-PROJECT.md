@@ -144,7 +144,7 @@ It goes first.
 
 | | need | size | note |
 | --- | --- | --- | --- |
-| S1 | discover members from `.gitmodules`, never a literal list | small | mirror the parent's own rule |
+| S1 | discover members from the **index** for existence, `.gitmodules` for names and URLs | small | see the correction below — `.gitmodules` alone is not authoritative |
 | S2 | `git_helper` needs a `cwd` parameter | medium | it has none today; ~15 functions, six composed by `changes.py` |
 | S3 | optional per-check `cwd:` | small | or delegate to the parent's dispatch |
 | S4 | commit ordering: member → stage gitlink → parent, with partial-failure semantics | medium | `commit_all` commits one repo and trusts it |
@@ -153,6 +153,38 @@ It goes first.
 | S7 | check classification, so an expected-red gate cannot reach a `verify_loop` | small | see below |
 | S8 | one baseline per member for the documenter | small | `pin_baseline` records one HEAD |
 | S9 | tag/release as a phase, for U4 | large | defer |
+
+### S1 correction — `.gitmodules` is not authoritative
+
+S1 originally read *"discover members from `.gitmodules`, never a literal list"*, praising
+the reviewed parent for reading that file rather than a hardcoded array. The "never a literal
+list" half is right. The source was wrong, and the probe is thirty seconds:
+
+```
+# parent with one submodule; control run first, with .gitmodules present
+git ls-files --stage | awk '$1=="160000"{print $4}'   -> sub
+git config --file .gitmodules --get-regexp path        -> submodule.sub.path sub
+
+rm .gitmodules
+git ls-files --stage | awk '$1=="160000"{print $4}'    -> sub        # still there
+git submodule status                                   -> sub        # still enumerated
+git submodule foreach --quiet 'echo $sm_path'          -> sub        # still enumerated
+git config --file .gitmodules --get-regexp path        -> ''         # BLIND
+```
+
+The gitlink lives in the **index** as a mode-`160000` entry. `.gitmodules` is a tracked
+convenience file carrying names and URLs, and deleting it removes neither the submodule nor
+git's own ability to enumerate it.
+
+Two consequences:
+
+- **For a refusal — "does this root contain gitlinks?" — read the index.** A guard that asks
+  `.gitmodules` answers "no submodules here" for a root that has them, which fails open on
+  precisely the configuration it exists to reject.
+- **A `.gitmodules`-driven fan-out silently skips such a member.** The pattern this document
+  praised is still the right pattern for iterating *named* members, and it remains far better
+  than a literal list, but it is not a completeness check. Worth knowing before trusting it as
+  one.
 
 ### S7 deserves its own note
 
