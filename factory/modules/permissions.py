@@ -57,9 +57,60 @@ RECOVERED_LIMIT = 3
 PRESERVE_MAX_BYTES = 1 << 20
 
 
-def _git(args: list[str], cwd) -> str:
+class SnapshotFailed(RuntimeError):
+    """The working tree could not be fingerprinted, so nothing can be enforced."""
+
+
+def _git(args: list[str], cwd) -> tuple[int, str, str]:
+    """Run git and report the outcome. The CALLER decides what a failure means.
+
+    This used to return `result.stdout if returncode == 0 else ""`, which cannot
+    distinguish "git reported no changes" from "git failed" — and every caller
+    read silence as cleanliness. `snapshot()` would return an impoverished or
+    empty dict, `changed_paths` would compare two of those and report nothing,
+    and `enforce()` would find no breach: permission enforcement silently void,
+    with no message anywhere.
+
+    Measured causes, none exotic:
+
+      * A repo with no commits. `git diff HEAD --numstat` exits 128 with
+        "ambiguous argument 'HEAD'", so tracked-file modifications go unseen
+        while untracked detection keeps working — partial, silent blindness in
+        any freshly `git init`-ed tree.
+      * A gitlink whose `.git` is missing or unreadable. BOTH probes exit 128 at
+        the parent root, so the fingerprint is empty and enforcement is void for
+        the whole tree, not just that path.
+      * Anything else that makes git fail: index.lock contention from a
+        concurrent process, a corrupted object, a stale worktree registration.
+
+    Returning the triple keeps the decision where the context is.
+    """
     result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    return result.stdout if result.returncode == 0 else ""
+    return result.returncode, result.stdout, result.stderr
+
+
+def _is_repo(cwd) -> bool:
+    """Is this tree under git at all?
+
+    A non-git target is SUPPORTED — `git_helper.repo_root()` says so explicitly
+    ("ADWs run fine in a non-git dir; only a commit phase requires a repo") and
+    falls back to the cwd. So "git failed because there is no repo" is a
+    legitimate state, not a fault, and must be told apart from "git failed in a
+    repo", which is the defect this module now refuses to run through.
+    """
+    returncode, _, _ = _git(["rev-parse", "--git-dir"], cwd)
+    return returncode == 0
+
+
+def _unborn_head(cwd) -> bool:
+    """True when HEAD names no commit yet — a repo that has never committed.
+
+    Distinguished from every other `git diff HEAD` failure because it is a
+    LEGITIMATE state for a target repo, and refusing to run in a fresh tree
+    would be a worse answer than fingerprinting it correctly.
+    """
+    returncode, _, _ = _git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd)
+    return returncode != 0
 
 
 def snapshot(run) -> dict[str, str]:
@@ -69,15 +120,50 @@ def snapshot(run) -> dict[str, str]:
     file still registers as a change. Untracked files are listed by name.
     Gitignored paths never appear, which is why the session runtime under
     `data_dir` — where handoff files legitimately land — needs no special case.
+
+    A failure to fingerprint RAISES rather than returning a partial answer. An
+    empty dict and an unreadable tree look identical downstream, and the second
+    one means nothing can be enforced — so it must stop the phase rather than
+    quietly permit everything.
     """
     fingerprints: dict[str, str] = {}
-    for line in _git(["diff", "HEAD", "--numstat"], run.repo_root).splitlines():
+
+    # No git, no fingerprint — and that is a supported target, not a failure.
+    # Nothing here can enforce `writes` in a tree git cannot see; the honest
+    # answer is an empty change-set, which is what this always returned. What
+    # changed is that it is now the answer to a QUESTION rather than the residue
+    # of a swallowed error.
+    if not _is_repo(run.repo_root):
+        return fingerprints
+
+    # Tracked modifications, against HEAD where there is one. A repo with no
+    # commits has no HEAD to diff, so the index itself is the comparison — every
+    # staged path reads as added, which is exactly what it is.
+    tracked_args = ["diff", "HEAD", "--numstat"]
+    if _unborn_head(run.repo_root):
+        tracked_args = ["diff", "--cached", "--numstat"]
+    returncode, out, err = _git(tracked_args, run.repo_root)
+    if returncode != 0:
+        raise SnapshotFailed(
+            f"cannot fingerprint the working tree: `git {' '.join(tracked_args)}` "
+            f"exited {returncode} in {run.repo_root}. Permission enforcement "
+            f"depends on this, so the phase stops rather than run unenforced.\n"
+            f"{err.strip()[:600]}")
+    for line in out.splitlines():
         fields = line.split("\t")
         if len(fields) >= 3:
             path = fields[-1].strip()
             fingerprints[path] = f"{fields[0]},{fields[1]}"
-    for path in _git(["ls-files", "--others", "--exclude-standard"],
-                     run.repo_root).splitlines():
+
+    returncode, out, err = _git(["ls-files", "--others", "--exclude-standard"],
+                                run.repo_root)
+    if returncode != 0:
+        raise SnapshotFailed(
+            f"cannot list untracked files: `git ls-files --others` exited "
+            f"{returncode} in {run.repo_root}. Permission enforcement depends on "
+            f"this, so the phase stops rather than run unenforced.\n"
+            f"{err.strip()[:600]}")
+    for path in out.splitlines():
         if path.strip():
             fingerprints[path.strip()] = "untracked"
     return fingerprints
